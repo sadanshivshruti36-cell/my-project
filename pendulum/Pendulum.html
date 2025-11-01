@@ -1,0 +1,176 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>WebXR Pendulum (NCERT Class 7)</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- A-Frame core -->
+    <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+    <style>
+      body { margin:0; }
+      #ui {
+        position: fixed; left: 12px; bottom: 12px; z-index: 5; font-family: system-ui, sans-serif;
+        background: rgba(0,0,0,.55); color: #fff; padding: 10px 12px; border-radius: 10px;
+      }
+      #ui button { margin-right: 8px; }
+      @media (max-width: 820px){ #ui { font-size: 14px; } }
+    </style>
+  </head>
+  <body>
+    <!-- Simple desktop UI (also works on Quest outside VR mode) -->
+    <div id="ui">
+      <button id="reset">Reset</button>
+      <button id="narrate">Play/Pause Narration</button>
+      <span id="readout">L=1.00 m • T=2.01 s</span>
+    </div>
+
+    <a-scene background="color: #101217" renderer="colorManagement:true; physicallyCorrectLights:true; antialias:true">
+      <!-- Lighting -->
+      <a-entity light="type: ambient; intensity: 0.7"></a-entity>
+      <a-entity light="type: directional; intensity: 0.8" position="2 3 1"></a-entity>
+
+      <!-- Floor -->
+      <a-plane rotation="-90 0 0" width="20" height="20" color="#1b1f2a" material="roughness:0.9; metalness:0.0"></a-plane>
+
+      <!-- Camera + controllers (laser pointers for interaction) -->
+      <a-entity id="rig" position="0 1.6 0">
+        <a-entity camera look-controls wasd-controls></a-entity>
+      </a-entity>
+      <a-entity id="rightHand" laser-controls="hand: right"
+                raycaster="objects: .clickable; far: 10" line="opacity: 0.9"></a-entity>
+      <a-entity id="leftHand" laser-controls="hand: left"
+                raycaster="objects: .clickable; far: 10" line="opacity: 0.5"></a-entity>
+
+      <!-- Pendulum assembly -->
+      <a-entity id="pendulum" position="0 2.2 -3"
+                pendulum-sim="length:1; gravity:9.81; damping:0.02">
+        <!-- Pivot -->
+        <a-entity geometry="primitive: box; height:0.05; width:0.3; depth:0.3"
+                  material="color:#b0b7c3; metalness:0.5; roughness:0.2" position="0 0 0"></a-entity>
+        <!-- Rod (auto-sized by sim) -->
+        <a-entity id="rod" geometry="primitive: box; width:0.02; height:1; depth:0.02"
+                  material="color:#e2e6ef; metalness:0.3; roughness:0.5" position="0 -0.5 0"></a-entity>
+        <!-- Bob (clickable to grab/release) -->
+        <a-sphere id="bob" class="clickable" radius="0.08" color="#f25c54"
+                  position="0 -1 0" shadow="cast:true; receive:false"></a-sphere>
+      </a-entity>
+
+      <!-- 3D classroom board -->
+      <a-entity position="-1.6 1.6 -2.6" rotation="0 20 0">
+        <a-plane width="1.6" height="0.9" color="#0d223a"></a-plane>
+        <a-text value="Simple Pendulum\nT = 2π√(L / g)" align="center" width="1.5" position="0 0.15 0"></a-text>
+        <a-text id="boardInfo" value="L=1.00 m  |  g=9.81 m/s²  |  θ=0.0°" align="center" width="1.5" position="0 -0.2 0"></a-text>
+      </a-entity>
+
+      <!-- Length controls (VR-clickable) -->
+      <a-entity position="1.3 1.3 -2.6" rotation="0 -20 0">
+        <a-plane width="0.9" height="0.42" color="#0e2a1e"></a-plane>
+        <a-text value="Length (L)" position="-0.38 0.12 0" width="0.9"></a-text>
+        <a-box id="lenMinus" class="clickable" depth="0.03" height="0.18" width="0.18" color="#2b7a0b"
+               position="-0.25 -0.05 0.02"></a-box>
+        <a-text value="–" position="-0.25 -0.07 0.03" width="0.5"></a-text>
+        <a-box id="lenPlus" class="clickable" depth="0.03" height="0.18" width="0.18" color="#2b7a0b"
+               position="0.25 -0.05 0.02"></a-box>
+        <a-text value="+" position="0.25 -0.07 0.03" width="0.5"></a-text>
+      </a-entity>
+
+      <!-- Audio narration (tap Play/Pause in UI) -->
+      <audio id="narration" crossorigin="anonymous"
+             src="https://upload.wikimedia.org/wikipedia/commons/transcoded/5/5a/EN-Simple_pendulum.ogv/EN-Simple_pendulum.ogv.360p.webm"></audio>
+      <a-entity sound="src: #narration; loop: false; volume: 0.9" id="narrationSound"></a-entity>
+
+      <!-- Sky -->
+      <a-sky color="#0a0d14"></a-sky>
+    </a-scene>
+
+    <script>
+      // --- Pendulum simulation component (RK4 integration) ---
+      AFRAME.registerComponent('pendulum-sim', {
+        schema: { length: {default: 1}, gravity: {default: 9.81}, damping: {default: 0.02} },
+        init() {
+          this.theta = AFRAME.utils.degToRad(15);   // initial angle (rad)
+          this.omega = 0;                           // angular velocity (rad/s)
+          this.holding = false;
+          this.last = performance.now()/1000;
+          this.pivot = new THREE.Vector3(0,0,0);
+          this.rodEl = this.el.querySelector('#rod');
+          this.bobEl = this.el.querySelector('#bob');
+          this.updateGeometry();
+          // Input: grabbing with laser pointer or mouse/touch
+          const startHold = () => { this.holding = true; this.omega = 0; };
+          const endHold   = () => { this.holding = false; }; // release with current theta stays
+          ['mousedown','triggerdown','gripdown'].forEach(ev => this.bobEl.addEventListener(ev, startHold));
+          ['mouseup','triggerup','gripup'].forEach(ev => {
+            this.bobEl.addEventListener(ev, endHold);
+          });
+          // VR length buttons
+          document.querySelector('#lenPlus').addEventListener('click', ()=> this.setLength(this.data.length + 0.05));
+          document.querySelector('#lenMinus').addEventListener('click',()=> this.setLength(Math.max(0.3, this.data.length - 0.05)));
+          // Desktop UI
+          document.getElementById('reset').addEventListener('click', ()=>{
+            this.theta = AFRAME.utils.degToRad(15); this.omega = 0;
+          });
+          const narrator = document.getElementById('narrationSound');
+          document.getElementById('narrate').addEventListener('click', ()=>{
+            if (narrator.components.sound.isPlaying) narrator.components.sound.stop();
+            else narrator.components.sound.playSound();
+          });
+        },
+        setLength(L){
+          this.data.length = L;
+          this.updateGeometry();
+        },
+        updateGeometry(){
+          // Resize rod and position bob based on length
+          const L = this.data.length;
+          this.rodEl.setAttribute('geometry', {primitive:'box', width:0.02, depth:0.02, height: L});
+          this.rodEl.object3D.position.set(0, -L/2, 0);
+          const x = L * Math.sin(this.theta);
+          const y = -L * Math.cos(this.theta);
+          this.bobEl.object3D.position.set(x, y, 0);
+          // Readouts
+          const T = 2 * Math.PI * Math.sqrt(L / this.data.gravity);
+          const deg = (this.theta * 180/Math.PI).toFixed(1);
+          document.getElementById('readout').textContent = `L=${L.toFixed(2)} m • T=${T.toFixed(2)} s`;
+          const board = document.getElementById('boardInfo');
+          board.setAttribute('value', `L=${L.toFixed(2)} m  |  g=${this.data.gravity.toFixed(2)} m/s²  |  θ=${deg}°`);
+        },
+        tick(){
+          const now = performance.now()/1000, dt = Math.min(0.033, now - this.last); // clamp
+          this.last = now;
+          const L = this.data.length, g = this.data.gravity, c = this.data.damping;
+
+          if (this.holding){
+            // When held: set theta toward pointer / camera direction projected onto pendulum plane
+            // Use camera direction to "drag" approximately (works well with lasers too)
+            const cam = this.el.sceneEl.camera;
+            const dir = new THREE.Vector3(0,0,-1).applyQuaternion(cam.quaternion); // forward
+            // Map horizontal forward vector to angle; scale for comfortable dragging
+            const targetTheta = Math.atan2(dir.x, Math.abs(dir.z)) * 1.2;
+            // Smoothly follow target
+            this.theta += (targetTheta - this.theta) * 0.25;
+            this.omega = 0;
+          } else {
+            // Integrate θ'' = -(g/L) sin θ - c θ'
+            const f = (theta, omega) => ({ dtheta: omega, domega: -(g/L)*Math.sin(theta) - c*omega });
+            // RK4
+            const k1 = f(this.theta, this.omega);
+            const k2 = f(this.theta + 0.5*dt*k1.dtheta, this.omega + 0.5*dt*k1.domega);
+            const k3 = f(this.theta + 0.5*dt*k2.dtheta, this.omega + 0.5*dt*k2.domega);
+            const k4 = f(this.theta + dt*k3.dtheta,     this.omega + dt*k3.domega);
+            this.theta += dt/6 * (k1.dtheta + 2*k2.dtheta + 2*k3.dtheta + k4.dtheta);
+            this.omega += dt/6 * (k1.domega + 2*k2.domega + 2*k3.domega + k4.domega);
+          }
+
+          // Update transforms
+          this.el.object3D.rotation.set(0,0,this.theta); // rotate assembly about z
+          // Bob local position already set by rod length; just recompute for accuracy
+          const x = this.data.length * Math.sin(this.theta);
+          const y = -this.data.length * Math.cos(this.theta);
+          this.bobEl.object3D.position.set(x, y, 0);
+          this.updateGeometry(); // also refresh text
+        }
+      });
+    </script>
+  </body>
+</html>
